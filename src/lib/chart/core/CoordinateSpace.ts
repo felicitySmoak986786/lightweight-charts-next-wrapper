@@ -31,6 +31,18 @@ export class CoordinateSpace {
     return coordinate === null ? null : (coordinate as number);
   }
 
+  /** Fractional bar index -> pixel X (continuous, works between/outside bars). */
+  logicalToX(logical: number): number | null {
+    const coordinate = this.chart.timeScale().logicalToCoordinate(logical as never);
+    return coordinate === null ? null : (coordinate as number);
+  }
+
+  /** Pixel X -> fractional bar index. Continuous, unlike `xToTime`. */
+  xToLogical(x: number): number | null {
+    const logical = this.chart.timeScale().coordinateToLogical(x as never);
+    return logical === null ? null : (logical as number);
+  }
+
   /** Pixel X -> data-space time (seconds). */
   xToTime(x: number): UnixTime | null {
     const time = this.chart.timeScale().coordinateToTime(x as never);
@@ -61,8 +73,9 @@ export class CoordinateSpace {
   pixelToData(x: number, y: number): DataPoint | null {
     const time = this.xToTime(x);
     const price = this.yToPrice(y);
+    const logical = this.xToLogical(x);
     if (time === null || price === null) return null;
-    return { time, price };
+    return { time, price, logical: logical ?? undefined };
   }
 
   /** Snap an arbitrary bar-space time to the nearest data timestamp. */

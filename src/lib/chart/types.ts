@@ -32,6 +32,12 @@ export interface Candle {
 export interface DataPoint {
   time: UnixTime;
   price: number;
+  /**
+   * Fractional bar (logical) index. When present it is the source of truth for
+   * the horizontal position, enabling smooth, bar-snapping-free placement. When
+   * absent the renderer falls back to `time`.
+   */
+  logical?: number;
 }
 
 export interface ThemeOptions {

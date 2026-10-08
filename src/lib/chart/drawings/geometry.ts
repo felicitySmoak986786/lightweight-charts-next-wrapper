@@ -53,7 +53,7 @@ export function midpoint(a: PixelPoint, b: PixelPoint): PixelPoint {
 /** Map a list of data points to pixels, skipping any that fall outside data. */
 export function toPixels(points: DataPoint[], view: DrawingView): (PixelPoint | null)[] {
   return points.map((point) => {
-    const x = view.timeToX(point.time);
+    const x = point.logical !== undefined ? view.logicalToX(point.logical) : view.timeToX(point.time);
     const y = view.priceToY(point.price);
     if (x === null || y === null) return null;
     return { x, y };

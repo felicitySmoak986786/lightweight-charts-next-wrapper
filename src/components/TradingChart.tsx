@@ -12,6 +12,7 @@ import { ChartClient } from '@/lib/chart';
 import type {
   Candle,
   Drawing,
+  DrawingLayerOptions,
   DrawingType,
   IndicatorInstance,
   IndicatorParamValue,
@@ -35,6 +36,8 @@ export interface TradingChartProps {
   style?: CSSProperties;
   /** Controlled active drawing tool. */
   activeTool?: DrawingType | 'select' | null;
+  /** Drawing interaction tuning (magnet, snap, auto-scroll, tool persistence). */
+  drawingOptions?: DrawingLayerOptions;
   /** Indicators created on mount, e.g. `[{ id: 'sma', params: { period: 50 } }]`. */
   initialIndicators?: Array<{ id: string; params?: Record<string, IndicatorParamValue> }>;
   onReady?: (client: ChartClient) => void;
@@ -60,6 +63,7 @@ export const TradingChart = forwardRef<TradingChartHandle, TradingChartProps>(fu
     className,
     style,
     activeTool,
+    drawingOptions,
     initialIndicators,
     onReady,
     onSelectionChange,
@@ -70,7 +74,7 @@ export const TradingChart = forwardRef<TradingChartHandle, TradingChartProps>(fu
   },
   ref,
 ) {
-  const { containerRef, client } = useTradingChart({ showVolume });
+  const { containerRef, client } = useTradingChart({ showVolume, ...drawingOptions });
   const initializedRef = useRef(false);
 
   useImperativeHandle(ref, () => ({ client }), [client]);

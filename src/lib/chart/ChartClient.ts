@@ -146,6 +146,15 @@ export class ChartClient extends EventBus<ChartClientEvents> {
     this.drawings.setTool(tool);
   }
 
+  /** Toggle magnet snapping for drawing anchors. */
+  setMagnet(enabled: boolean): void {
+    this.drawingLayer.setMagnet(enabled);
+  }
+
+  get magnet(): boolean {
+    return this.drawingLayer.magnet;
+  }
+
   registerDrawingTool(tool: DrawingTool): void {
     this.drawings.registerTool(tool);
   }

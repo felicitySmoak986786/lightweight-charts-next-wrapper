@@ -5,6 +5,7 @@ import {
   CursorIcon,
   EraserIcon,
   LongIcon,
+  MagnetIcon,
   RectangleIcon,
   RedoIcon,
   RulerIcon,
@@ -17,6 +18,8 @@ import {
 export interface DrawingRailProps {
   activeTool: DrawingType | 'select';
   onTool: (tool: DrawingType | 'select') => void;
+  magnet: boolean;
+  onToggleMagnet: () => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -38,6 +41,8 @@ const TOOLS: Array<{ type: DrawingType; label: string; Icon: typeof CursorIcon }
 export function DrawingRail({
   activeTool,
   onTool,
+  magnet,
+  onToggleMagnet,
   onUndo,
   onRedo,
   canUndo,
@@ -56,6 +61,14 @@ export function DrawingRail({
         onClick={() => onTool('select')}
       >
         <CursorIcon />
+      </button>
+      <button
+        type="button"
+        className={`rail-btn ${magnet ? 'active' : ''}`}
+        title="Magnet snap to OHLC (Alt)"
+        onClick={onToggleMagnet}
+      >
+        <MagnetIcon />
       </button>
 
       <div className="rail-sep" />

@@ -122,10 +122,25 @@ const { containerRef, client } = useTradingChart({ showVolume: true });
 | `longPosition` | 3 | Entry / target / stop with profit & loss zones + R/R |
 | `shortPosition` | 3 | Short variant of the position tool |
 
-Interaction model: click to place anchor points, `Esc` to cancel, drag handles
-to modify, drag the body to move, `Delete` to remove, `Ctrl+Z` / `Ctrl+Shift+Z`
-to undo/redo. Drawings can be exported/imported as JSON via
-`serializeDrawings()` / `loadDrawings()`.
+Interaction model (TradingView / Angel One style): **drag-and-release or
+click-click** to create, with the preview line tracking the cursor continuously.
+Anchors are stored in fractional bar-index space, so they never snap to bar
+centres unless magnet is enabled - drawing stays smooth at any zoom. Dragging
+near the left/right edge **auto-scrolls** the chart. `Esc` cancels, drag handles
+to resize, drag the body to move, `Delete` removes, `Ctrl+Z` / `Ctrl+Shift+Z`
+undo/redo. `Alt` (or the magnet button in the rail) toggles OHLC snapping.
+
+Drawing behaviour is configurable via `DrawingLayerOptions`:
+
+```ts
+<TradingChart
+  data={candles}
+  drawingOptions={{ magnet: true, keepToolActive: true, autoScroll: true }}
+/>
+```
+
+Drawings can be exported/imported as JSON via `serializeDrawings()` /
+`loadDrawings()`.
 
 ### Custom drawing tools
 

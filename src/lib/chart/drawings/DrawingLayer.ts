@@ -1,29 +1,43 @@
 import type { CoordinateSpace } from '../core/CoordinateSpace';
 import type { DataStore } from '../core/DataStore';
 import type { ChartEngine } from '../core/ChartEngine';
+import type { DataPoint } from '../types';
 import { DrawingManager } from './DrawingManager';
 import type { Drawing, DrawingType, DrawingView, HitZone, PixelPoint } from './types';
 
 export interface DrawingLayerOptions {
-  /** Snap anchors to the nearest bar (default true). */
+  /** Snap anchor time to the nearest bar (default false: free placement). */
   snapToBar?: boolean;
-  /** Keep the tool armed after finishing a drawing (default true). */
+  /** Keep the tool armed after finishing a drawing (default false). */
   keepToolActive?: boolean;
+  /**
+   * Magnet mode: snap anchors to the nearest bar's time and to the closest of
+   * that bar's OHLC values (default false).
+   */
+  magnet?: boolean;
+  /** Auto-scroll the chart when dragging near the left/right edge (default true). */
+  autoScroll?: boolean;
 }
 
 interface DragState {
   id: string;
   kind: 'handle' | 'body';
   handleIndex: number;
-  startTime: number;
+  startLogical: number;
   startPrice: number;
-  originalPoints: Drawing['points'];
+  originalPoints: DataPoint[];
 }
+
+const MIN_MOVE = 3;
+const EDGE = 56;
+const AUTOSCROLL_STEP = 0.35;
 
 const CURSOR_STYLES = `
 .lwc-draw-crosshair canvas { cursor: crosshair !important; }
 .lwc-draw-move canvas { cursor: move !important; }
+.lwc-draw-grab canvas { cursor: grab !important; }
 .lwc-draw-grabbing canvas { cursor: grabbing !important; }
+.lwc-draw-nwse canvas { cursor: nwse-resize !important; }
 `;
 
 function ensureCursorStyles(): void {
@@ -35,26 +49,42 @@ function ensureCursorStyles(): void {
   document.head.appendChild(style);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 /**
  * Imperative canvas overlay that renders drawings and handles all pointer
- * interaction: creation, selection, handle resizing, body dragging and deletion.
+ * interaction: free-form creation (drag or click-click), selection, handle
+ * resizing, body dragging, edge auto-scroll and deletion.
  *
- * The canvas is `pointer-events: none` so the chart remains pannable; pointer
- * events are intercepted on the container in the capture phase only when the
- * layer needs to consume them.
+ * Anchors are stored in fractional bar-index (`logical`) + price space so they
+ * move continuously with the cursor instead of snapping to bar centres, which
+ * matches the TradingView/Angel One drawing feel. The canvas is
+ * `pointer-events: none`; pointer events are intercepted on the container in the
+ * capture phase only when the layer needs to consume them.
  */
 export class DrawingLayer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly container: HTMLElement;
-  private readonly options: Required<DrawingLayerOptions>;
+  private options: Required<DrawingLayerOptions>;
   private readonly disposers: Array<() => void> = [];
 
-  private previewPoints: Array<{ time: number; price: number }> = [];
+  private previewPoints: DataPoint[] = [];
   private cursor: PixelPoint | null = null;
+  private lastPixel: PixelPoint | null = null;
   private hoveredId: string | null = null;
   private hoveredZone: HitZone = null;
   private drag: DragState | null = null;
+
+  private pointerDown = false;
+  private downPixel: PixelPoint | null = null;
+  private movedSinceDown = false;
+
+  private autoscrollDir = 0;
+  private autoscrollRaf = 0;
+
   private rafId = 0;
   private destroyed = false;
 
@@ -68,8 +98,10 @@ export class DrawingLayer {
   ) {
     this.container = container;
     this.options = {
-      snapToBar: options.snapToBar ?? true,
-      keepToolActive: options.keepToolActive ?? true,
+      snapToBar: options.snapToBar ?? false,
+      keepToolActive: options.keepToolActive ?? false,
+      magnet: options.magnet ?? false,
+      autoScroll: options.autoScroll ?? true,
     };
     ensureCursorStyles();
 
@@ -107,6 +139,7 @@ export class DrawingLayer {
     container.addEventListener('pointerdown', onPointerDown, true);
     container.addEventListener('pointermove', onPointerMove, true);
     container.addEventListener('pointerup', onPointerUp, true);
+    container.addEventListener('pointercancel', onPointerUp, true);
     container.addEventListener('dblclick', onDoubleClick, true);
     container.addEventListener('keydown', onKeyDown);
     container.setAttribute('tabindex', container.getAttribute('tabindex') ?? '0');
@@ -115,6 +148,7 @@ export class DrawingLayer {
       () => container.removeEventListener('pointerdown', onPointerDown, true),
       () => container.removeEventListener('pointermove', onPointerMove, true),
       () => container.removeEventListener('pointerup', onPointerUp, true),
+      () => container.removeEventListener('pointercancel', onPointerUp, true),
       () => container.removeEventListener('dblclick', onDoubleClick, true),
       () => container.removeEventListener('keydown', onKeyDown),
     );
@@ -143,7 +177,21 @@ export class DrawingLayer {
   cancelPreview(): void {
     this.previewPoints = [];
     this.drag = null;
+    this.pointerDown = false;
+    this.downPixel = null;
+    this.movedSinceDown = false;
+    this.hoveredId = null;
+    this.hoveredZone = null;
+    this.stopAutoScroll();
     this.applyCursor();
+  }
+
+  setMagnet(enabled: boolean): void {
+    this.options.magnet = enabled;
+  }
+
+  get magnet(): boolean {
+    return this.options.magnet;
   }
 
   requestRedraw(): void {
@@ -157,6 +205,7 @@ export class DrawingLayer {
   destroy(): void {
     this.destroyed = true;
     if (this.rafId) cancelAnimationFrame(this.rafId);
+    this.stopAutoScroll();
     for (const dispose of this.disposers) dispose();
     this.canvas.remove();
   }
@@ -179,6 +228,7 @@ export class DrawingLayer {
   private get view(): DrawingView {
     return {
       timeToX: (time) => this.space.timeToX(time),
+      logicalToX: (logical) => this.space.logicalToX(logical),
       priceToY: (price) => this.space.priceToY(price),
       xToTime: (x) => this.space.xToTime(x),
       yToPrice: (y) => this.space.yToPrice(y),
@@ -210,14 +260,14 @@ export class DrawingLayer {
       if (tool) {
         const points = [...this.previewPoints];
         if (this.cursor) {
-          const snapped = this.snapToBar(this.dataFromPixel(this.cursor.x, this.cursor.y));
-          if (snapped) points.push(snapped);
+          const point = this.pointFromPixel(this.cursor.x, this.cursor.y);
+          if (point) points.push(point);
         }
         const previewDrawing: Drawing = {
           id: '__preview__',
           type: tool.type,
           points,
-          style: tool.defaultStyle(),
+          style: { ...tool.defaultStyle(), lineStyle: 'dashed' },
           locked: false,
           visible: true,
         };
@@ -264,7 +314,7 @@ export class DrawingLayer {
   // ---------------------------------------------------------------------------
 
   private handlePointerDown(event: PointerEvent): void {
-    if (event.button !== 0) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
     const pixel = this.pixelFromEvent(event);
     const tool = this.manager.activeTool;
 
@@ -272,9 +322,17 @@ export class DrawingLayer {
       event.preventDefault();
       event.stopPropagation();
       this.container.focus({ preventScroll: true });
-      const point = this.snapToBar(this.dataFromPixel(pixel.x, pixel.y));
+      const point = this.pointFromPixel(pixel.x, pixel.y);
       if (!point) return;
+      this.capture(event);
+
+      this.pointerDown = true;
+      this.downPixel = pixel;
+      this.lastPixel = pixel;
+      this.movedSinceDown = false;
+      this.cursor = pixel;
       this.previewPoints.push(point);
+
       const required = this.manager.getTool(tool)?.requiredPoints ?? 2;
       if (this.previewPoints.length >= required) this.finishPreview();
       this.requestRedraw();
@@ -288,14 +346,19 @@ export class DrawingLayer {
       event.stopPropagation();
       this.container.focus({ preventScroll: true });
       this.manager.select(hit.drawing.id);
-      const data = this.dataFromPixel(pixel.x, pixel.y);
+      const data = this.pointFromPixel(pixel.x, pixel.y);
       if (data && !hit.drawing.locked) {
+        this.capture(event);
         this.manager.beginHistory();
+        this.pointerDown = true;
+        this.downPixel = pixel;
+        this.lastPixel = pixel;
+        this.movedSinceDown = false;
         this.drag = {
           id: hit.drawing.id,
           kind: hit.zone?.kind === 'handle' ? 'handle' : 'body',
           handleIndex: hit.zone?.kind === 'handle' ? hit.zone.index : -1,
-          startTime: data.time,
+          startLogical: data.logical ?? this.logicalFromTime(data.time),
           startPrice: data.price,
           originalPoints: hit.drawing.points.map((p) => ({ ...p })),
         };
@@ -311,19 +374,32 @@ export class DrawingLayer {
 
   private handlePointerMove(event: PointerEvent): void {
     const pixel = this.pixelFromEvent(event);
+    this.lastPixel = pixel;
+    this.cursor = pixel;
+
+    if (this.pointerDown && this.downPixel && !this.movedSinceDown) {
+      if (Math.hypot(pixel.x - this.downPixel.x, pixel.y - this.downPixel.y) > MIN_MOVE) {
+        this.movedSinceDown = true;
+      }
+    }
 
     if (this.drag) {
       event.preventDefault();
       event.stopPropagation();
-      this.applyDrag(pixel);
+      if (this.movedSinceDown) this.applyDrag(pixel);
+      this.updateAutoScroll(pixel);
       return;
     }
 
     if (this.previewType) {
-      event.preventDefault();
-      event.stopPropagation();
-      this.cursor = pixel;
-      this.requestRedraw();
+      // Only intercept while a drawing gesture is in progress; otherwise let the
+      // chart's own crosshair/pan behaviour work while the tool is merely armed.
+      if (this.previewPoints.length > 0 || this.pointerDown) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.updateAutoScroll(pixel);
+        this.requestRedraw();
+      }
       return;
     }
 
@@ -332,7 +408,7 @@ export class DrawingLayer {
     this.hoveredId = hit?.drawing.id ?? null;
     this.hoveredZone = hit?.zone ?? null;
     if (this.hoveredId) {
-      this.setCursorMode(hit?.zone?.kind === 'handle' ? 'grabbing' : 'move');
+      this.setCursorMode(hit?.zone?.kind === 'handle' ? 'nwse' : 'move');
     } else {
       this.clearCursorMode();
     }
@@ -340,16 +416,33 @@ export class DrawingLayer {
   }
 
   private handlePointerUp(event: PointerEvent): void {
-    if (!this.drag) return;
+    if (!this.pointerDown && !this.drag) return;
     event.preventDefault();
     event.stopPropagation();
-    this.drag = null;
+    this.release(event);
+    this.stopAutoScroll();
+
+    if (this.drag) {
+      this.drag = null;
+    } else if (this.previewType) {
+      const required = this.manager.getTool(this.previewType)?.requiredPoints ?? 2;
+      // Drag-to-draw: a 2-point tool finishes on release when the pointer moved.
+      if (required === 2 && this.movedSinceDown && this.previewPoints.length === 1 && this.lastPixel) {
+        const point = this.pointFromPixel(this.lastPixel.x, this.lastPixel.y);
+        if (point) this.previewPoints.push(point);
+        this.finishPreview();
+      }
+    }
+
+    this.pointerDown = false;
+    this.downPixel = null;
+    this.movedSinceDown = false;
     this.applyCursor();
     this.requestRedraw();
   }
 
   private handleDoubleClick(event: MouseEvent): void {
-    if (this.previewPoints.length > 0 && this.manager.activeTool !== 'select') {
+    if (this.previewPoints.length >= 2 && this.manager.activeTool !== 'select') {
       event.preventDefault();
       event.stopPropagation();
       this.finishPreview();
@@ -383,26 +476,28 @@ export class DrawingLayer {
 
   private applyDrag(pixel: PixelPoint): void {
     if (!this.drag) return;
-    const current = this.dataFromPixel(pixel.x, pixel.y);
+    const current = this.pointFromPixel(pixel.x, pixel.y, this.drag.kind === 'handle');
     if (!current) return;
     const drawing = this.manager.get(this.drag.id);
     const tool = drawing ? this.manager.getTool(drawing.type) : undefined;
     if (!drawing || !tool) return;
 
     if (this.drag.kind === 'handle') {
-      const snapped = this.snapToBar(current);
-      if (!snapped) return;
       this.manager.mutate(drawing.id, (target) => {
-        tool.moveHandle(target, this.drag!.handleIndex, snapped);
+        tool.moveHandle(target, this.drag!.handleIndex, current);
       });
     } else {
-      const deltaTime = current.time - this.drag.startTime;
+      const deltaLogical = (current.logical ?? this.logicalFromTime(current.time)) - this.drag.startLogical;
       const deltaPrice = current.price - this.drag.startPrice;
       this.manager.mutate(drawing.id, (target) => {
-        target.points = this.drag!.originalPoints.map((point) => ({
-          time: point.time + deltaTime,
-          price: point.price + deltaPrice,
-        }));
+        target.points = this.drag!.originalPoints.map((point) => {
+          const logical = (point.logical ?? this.logicalFromTime(point.time)) + deltaLogical;
+          return {
+            time: this.timeFromLogical(logical),
+            price: point.price + deltaPrice,
+            logical,
+          };
+        });
       });
     }
   }
@@ -415,8 +510,8 @@ export class DrawingLayer {
     this.previewPoints = [];
     if (!drawingTool || points.length === 0) return;
 
-    const needsSnap = this.options.snapToBar;
-    const finalPoints = needsSnap ? points.map((p) => this.snapToBar(p) ?? p) : points;
+    const required = drawingTool.requiredPoints;
+    const finalPoints = points.slice(0, required);
     const drawing = this.manager.add({ type: tool, points: finalPoints });
     if (!this.options.keepToolActive) this.manager.setTool('select');
     this.manager.select(drawing.id);
@@ -424,7 +519,48 @@ export class DrawingLayer {
   }
 
   // ---------------------------------------------------------------------------
-  // Helpers
+  // Edge auto-scroll
+  // ---------------------------------------------------------------------------
+
+  private updateAutoScroll(pixel: PixelPoint): void {
+    if (!this.options.autoScroll) return;
+    const width = this.view.width;
+    let dir = 0;
+    if (pixel.x < EDGE) dir = -1;
+    else if (pixel.x > width - EDGE) dir = 1;
+    this.autoscrollDir = dir;
+    if (dir !== 0) this.startAutoScroll();
+    else this.stopAutoScroll();
+  }
+
+  private startAutoScroll(): void {
+    if (this.autoscrollRaf || this.destroyed) return;
+    const step = () => {
+      this.autoscrollRaf = 0;
+      if (this.autoscrollDir === 0 || this.destroyed) return;
+      const timeScale = this.engine.chart.timeScale();
+      const range = timeScale.getVisibleLogicalRange();
+      if (range) {
+        const delta = this.autoscrollDir * AUTOSCROLL_STEP;
+        timeScale.setVisibleLogicalRange({ from: range.from + delta, to: range.to + delta });
+      }
+      if (this.drag && this.lastPixel) this.applyDrag(this.lastPixel);
+      this.requestRedraw();
+      this.autoscrollRaf = requestAnimationFrame(step);
+    };
+    this.autoscrollRaf = requestAnimationFrame(step);
+  }
+
+  private stopAutoScroll(): void {
+    this.autoscrollDir = 0;
+    if (this.autoscrollRaf) {
+      cancelAnimationFrame(this.autoscrollRaf);
+      this.autoscrollRaf = 0;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Coordinate helpers
   // ---------------------------------------------------------------------------
 
   private hitTest(pixel: PixelPoint): { drawing: Drawing; zone: HitZone } | null {
@@ -446,26 +582,107 @@ export class DrawingLayer {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
-  private dataFromPixel(x: number, y: number): { time: number; price: number } | null {
-    const time = this.space.xToTime(x);
+  /** Build a data-space point from a pixel, applying magnet/snap if enabled. */
+  private pointFromPixel(x: number, y: number, snap = true): DataPoint | null {
+    const logical = this.space.xToLogical(x);
     const price = this.space.yToPrice(y);
-    if (time === null || price === null) return null;
-    return { time, price };
+    if (logical === null || price === null) return null;
+    const time = this.space.xToTime(x) ?? this.timeFromLogical(logical);
+    const point: DataPoint = { time, price, logical };
+    return snap ? this.applySnap(point) : point;
   }
 
-  private snapToBar(point: { time: number; price: number } | null): { time: number; price: number } | null {
-    if (!point) return null;
-    if (!this.options.snapToBar) return point;
-    return { time: this.space.snapTime(point.time, this.store.revealed()), price: point.price };
+  private applySnap(point: DataPoint): DataPoint {
+    const candles = this.store.revealed();
+    if (candles.length === 0) return point;
+    const logical = point.logical ?? this.logicalFromTime(point.time);
+    const index = clamp(Math.round(logical), 0, candles.length - 1);
+    const candle = candles[index];
+
+    if (this.options.magnet) {
+      const candidates = [candle.open, candle.high, candle.low, candle.close];
+      let best = candidates[0];
+      let bestDiff = Infinity;
+      for (const value of candidates) {
+        const diff = Math.abs(value - point.price);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = value;
+        }
+      }
+      return { time: candle.time, price: best, logical: index };
+    }
+
+    if (this.options.snapToBar) {
+      return { time: candle.time, price: point.price, logical: index };
+    }
+
+    return point;
   }
 
-  private setCursorMode(mode: 'crosshair' | 'move' | 'grabbing'): void {
+  /** Best-effort UNIX time for a fractional bar index (extrapolates past the ends). */
+  private timeFromLogical(logical: number): number {
+    const candles = this.store.all();
+    if (candles.length === 0) return Math.floor(Date.now() / 1000);
+    const index = Math.round(logical);
+    if (index >= 0 && index < candles.length) return candles[index].time;
+    const last = candles[candles.length - 1];
+    const first = candles[0];
+    const interval = candles.length > 1 ? last.time - candles[candles.length - 2].time : 60;
+    if (index >= candles.length) return last.time + (index - (candles.length - 1)) * interval;
+    return first.time + index * interval;
+  }
+
+  private logicalFromTime(time: number): number {
+    const candles = this.store.all();
+    if (candles.length === 0) return 0;
+    let bestIndex = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < candles.length; i += 1) {
+      const diff = Math.abs(candles[i].time - time);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIndex = i;
+      }
+    }
+    return bestIndex;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pointer capture / cursor
+  // ---------------------------------------------------------------------------
+
+  private capture(event: PointerEvent): void {
+    try {
+      this.container.setPointerCapture(event.pointerId);
+    } catch {
+      // Capture is best-effort.
+    }
+  }
+
+  private release(event: PointerEvent): void {
+    try {
+      if (this.container.hasPointerCapture(event.pointerId)) {
+        this.container.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Ignore.
+    }
+  }
+
+  private setCursorMode(mode: 'crosshair' | 'move' | 'grab' | 'grabbing' | 'nwse'): void {
     this.clearCursorMode();
     this.container.classList.add(`lwc-draw-${mode}`);
   }
 
   private clearCursorMode(): void {
-    this.container.classList.remove('lwc-draw-crosshair', 'lwc-draw-move', 'lwc-draw-grabbing');
+    this.container.classList.remove(
+      'lwc-draw-crosshair',
+      'lwc-draw-move',
+      'lwc-draw-grab',
+      'lwc-draw-grabbing',
+      'lwc-draw-nwse',
+    );
   }
 
   private applyCursor(): void {

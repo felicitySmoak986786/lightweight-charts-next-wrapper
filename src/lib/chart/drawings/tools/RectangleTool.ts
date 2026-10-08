@@ -95,12 +95,12 @@ export class RectangleTool implements DrawingTool {
         drawing.points[1] = { ...point };
         break;
       case 2:
-        drawing.points[0] = { time: point.time, price: p0.price };
-        drawing.points[1] = { time: p1.time, price: point.price };
+        drawing.points[0] = { time: point.time, price: p0.price, logical: point.logical };
+        drawing.points[1] = { time: p1.time, price: point.price, logical: p1.logical };
         break;
       case 3:
-        drawing.points[1] = { time: point.time, price: p1.price };
-        drawing.points[0] = { time: p0.time, price: point.price };
+        drawing.points[1] = { time: point.time, price: p1.price, logical: point.logical };
+        drawing.points[0] = { time: p0.time, price: point.price, logical: p0.logical };
         break;
       default:
         break;

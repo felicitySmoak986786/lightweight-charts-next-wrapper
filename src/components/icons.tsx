@@ -118,6 +118,15 @@ export function IndicatorsIcon(props: IconProps) {
   );
 }
 
+export function MagnetIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M6 4v8a6 6 0 0012 0V4" />
+      <path d="M6 4h4v6H6zM14 4h4v6h-4z" />
+    </svg>
+  );
+}
+
 export function ReplayIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

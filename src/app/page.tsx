@@ -17,6 +17,7 @@ import type {
   ChartClient,
   ChartType,
   Drawing,
+  DrawingLayerOptions,
   DrawingType,
   IndicatorDefinition,
   IndicatorInstance,
@@ -71,7 +72,15 @@ export default function HomePage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [magnet, setMagnet] = useState(false);
   const [priceInfo, setPriceInfo] = useState<PriceInfo>({ price: 0, change: 0, changePercent: 0 });
+  const magnetRef = useRef(magnet);
+  magnetRef.current = magnet;
+
+  const drawingOptions = useMemo<DrawingLayerOptions>(
+    () => ({ snapToBar: false, keepToolActive: false, magnet: false, autoScroll: true }),
+    [],
+  );
 
   // Base dataset at 1-minute resolution; other timeframes are aggregated from it.
   const baseData = useMemo(() => generateCandles({ count: 60 * 24 * 5, interval: 60, seed: 20240517 }), []);
@@ -101,10 +110,11 @@ export default function HomePage() {
     (c: ChartClient) => {
       clientRef.current = c;
       setClient(c);
+      c.setMagnet(magnetRef.current);
       for (const definition of customIndicators) c.registerIndicator(definition);
       setDefinitions(c.listIndicatorDefinitions());
       refreshPrice();
-      setStatus('Chart ready. Use the timeframe bar, indicator menu and the drawing rail on the left.');
+      setStatus('Chart ready. Drag or click-click to draw, Alt or the magnet button to snap, arrows auto-scroll at the edges.');
     },
     [refreshPrice],
   );
@@ -122,6 +132,22 @@ export default function HomePage() {
   }, [client, refreshPrice]);
 
   const handleTool = useCallback((next: DrawingType | 'select') => setTool(next), []);
+
+  const toggleMagnet = useCallback(() => {
+    setMagnet((value) => {
+      const next = !value;
+      clientRef.current?.setMagnet(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Alt' && !event.repeat) toggleMagnet();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggleMagnet]);
 
   const handleTimeframe = useCallback((id: string) => setTimeframe(id), []);
 
@@ -253,6 +279,7 @@ export default function HomePage() {
           data={data as Candle[]}
           theme={theme}
           activeTool={tool}
+          drawingOptions={drawingOptions}
           height="100%"
           initialIndicators={[
             { id: 'sma', params: { period: 50, color: '#1677ff' } },
@@ -267,6 +294,8 @@ export default function HomePage() {
           <DrawingRail
             activeTool={tool}
             onTool={handleTool}
+            magnet={magnet}
+            onToggleMagnet={toggleMagnet}
             onUndo={handleUndo}
             onRedo={handleRedo}
             canUndo={client?.drawings.canUndo ?? false}

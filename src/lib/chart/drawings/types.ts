@@ -37,6 +37,8 @@ export interface PixelPoint {
 
 export interface DrawingView {
   timeToX(time: UnixTime): number | null;
+  /** Fractional bar index -> pixel X (continuous free placement). */
+  logicalToX(logical: number): number | null;
   priceToY(price: number): number | null;
   xToTime(x: number): number | null;
   yToPrice(y: number): number | null;
