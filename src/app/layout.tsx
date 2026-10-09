@@ -1,17 +1,17 @@
-import type { Metadata } from 'next';
-import type { ReactNode } from 'react';
-import './globals.css';
+import type { Metadata } from "next";
+import "./globals.css";
 
 export const metadata: Metadata = {
-  title: 'lightweight-charts Next.js Wrapper',
-  description:
-    'Modular Next.js wrapper around lightweight-charts with drawing tools, custom indicators, replay mode and order markers.',
+  title: "Multi-Chart Terminal",
+  description: "Four resizable openalgo-charts panels on a shadcn/ui grid",
 };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" className="dark h-full">
+      <body className="h-full overflow-hidden bg-background text-foreground antialiased">
+        {children}
+      </body>
     </html>
   );
 }
